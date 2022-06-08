@@ -1,0 +1,175 @@
+#cloud-config
+# EDIT THIS FILE AND RUNNING AGAIN TERRAFORM WILL CAUSE EBS DISK TO BE RECREATED!!! TAKE SNAPSHOT OF DATA DISK BEFORE!
+# Check cloud-init logs: `tail /var/log/cloud-init-output.log -n1000 -f`
+repo_update: true
+repo_upgrade: all
+
+users:
+  - default
+  - name: eth1
+    system: true
+    shell: /sbin/nologin
+  - name: eth2
+    system: true
+    shell: /sbin/nologin
+  - name: validator
+    system: true
+    shell: /sbin/nologin
+    sudo: ['ALL=(ALL) NOPASSWD: RP_CMDS']
+  - name: rc
+    gecos: Revan
+    ssh-authorized-keys:
+      - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDGR+LDVp47T50Be/uKvBm22jDI+Gfj1lqUkZmafa6YG1vfGoYADlg9BXSSMTeLrkY6xHQgbehBwyM2NyWqTZu15zHDC8QzezsB/rfi1e8NFzT/z0YgNRPL7Fvd5r8U+410uAOfs/a3nVP8NYSJDL9iJYA+HnxLNShLo+dwIuZ2nrJkdrINONrkSRbhezypZZxZEyTTQAjarU1/77f0vvm6d8S69NgflAohbVCqqVg1Lp9TiPB7tJOfL9URscvQIMRDkEtv5pccF6Us6XrX+DIyNslIH3to9FP/jUwX02uC9mX8QY3BUCFJaTesQFLhizu4SB3BEm7DUsHKQSGMpS/T gregbk1@laptopasus
+    groups: sudo
+    shell: /bin/bash
+
+packages:
+ - git
+ - unzip
+ - nmap
+ - net-tools
+ - htop
+ - unattended-upgrades
+ - update-notifier-common
+
+write_files:
+  - path: /etc/sysctl.d/swap.conf
+    permissions: 0644
+    owner: root
+    content: |
+      vm.swappiness=6
+      vm.vfs_cache_pressure=10
+
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    permissions: 0644
+    owner: root
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+      APT::Periodic::AutocleanInterval "7";
+      Unattended-Upgrade::Remove-Unused-Dependencies "true";
+      Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
+      # This is the most important choice: auto-reboot.
+      Unattended-Upgrade::Automatic-Reboot "true";
+      Unattended-Upgrade::Automatic-Reboot-Time "02:00";
+
+  - path: /etc/systemd/system/geth.service
+    permissions: 0644
+    owner: root
+    content: |
+      [Unit]
+      Description=Geth
+      After=network.target
+
+      [Service]
+      Type=simple
+      User=eth1
+      Restart=always
+      RestartSec=5
+      ExecStart=/srv/geth/geth --datadir /srv/geth/geth_data --goerli --cache 512 --maxpeers 25 --http --http.port 8545 --http.api eth,net,personal,web3 --ws --ws.port 8546 --ws.api eth,net,personal,web3
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /srv/geth/log.sh
+    permissions: 0755
+    owner: root
+    content: |
+      #!/bin/bash
+      journalctl -u geth -b -f
+
+  - path: /etc/systemd/system/lh-beacon.service
+    permissions: 0644
+    owner: root
+    content: |
+      [Unit]
+      Description=Lighthouse Beacon Chain
+      After=network.target
+
+      [Service]
+      Type=simple
+      User=eth2
+      Restart=always
+      RestartSec=5
+      ExecStart=/srv/lighthouse/lighthouse beacon --network prater --datadir /srv/lighthouse/lighthouse_data --port 9001 --discovery-port 9001 --eth1 --eth1-endpoints http://localhost:8545 --http --http-port 5052 --eth1-blocks-per-log-query 150 --disable-upnp
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /srv/lighthouse/beacon-log.sh
+    permissions: 0755
+    owner: root
+    content: |
+      #!/bin/bash
+      journalctl -u lh-beacon -b -f
+
+  - path: /etc/systemd/system/lh-validator.service
+    permissions: 0644
+    owner: root
+    content: |
+      [Unit]
+      Description=Lighthouse Validator
+      After=network.target
+
+      [Service]
+      Type=simple
+      User=validator
+      Restart=always
+      RestartSec=5
+      ExecStart=/srv/lighthouse/lighthouse validator --network prater --datadir /srv/rocketpool/data/validators/lighthouse --init-slashing-protection --beacon-node "http://localhost:5052" --graffiti "RP Lighthouse"
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /srv/lighthouse/validator-log.sh
+    permissions: 0755
+    owner: root
+    content: |
+      #!/bin/bash
+      journalctl -u lh-validator -b -f
+
+runcmd:
+  # Disable ubuntu account
+  - sudo chage -E0 ubuntu
+  - echo "PermitRootLogin no" >> /etc/ssh/sshd_config
+  - echo "AllowUsers rc" >> /etc/ssh/sshd_config
+  - echo "DenyUsers root ubuntu" >> /etc/ssh/sshd_config
+  - sudo systemctl restart sshd
+  # Secure shared memory
+  - echo "tmpfs    /run/shm    tmpfs    ro,noexec,nosuid    0 0" >> /etc/fstab
+  # Swapfile + swapiness config
+  - sudo swapoff -a
+  #- sudo dd if=/dev/zero of=/swapfile bs=1G count=16 status=progress
+  - sudo dd if=/dev/zero of=/swapfile bs=1G count=1 status=progress
+  - sudo chmod 600 /swapfile
+  - sudo mkswap /swapfile
+  - sudo swapon /swapfile
+  - sudo swapon -s
+  - sudo sysctl --system
+  - echo "### CHECK - should have - swappiness=6 - cache_presure=10"
+  - ls -lah /swapfile
+  - sudo sysctl -n vm.swappiness
+  - sudo sysctl -n vm.vfs_cache_pressure
+  # Install softs
+  - echo "### SETUP GETH"
+  - sudo mkdir -p /srv/geth
+  #- sudo chown eth1:eth1 /srv/geth
+  - sudo mkdir -p /srv/geth/geth_data
+  - sudo chown eth1:eth1 /srv/geth/geth_data
+  - cd /tmp
+  - wget -q https://gethstore.blob.core.windows.net/builds/geth-linux-amd64-1.10.16-20356e57.tar.gz
+  - tar xzf geth-linux-amd64-1.10.16-20356e57.tar.gz
+  - cp geth-linux-amd64-1.10.16-20356e57/geth /srv/geth
+  - /srv/geth/geth --version
+  - echo "### SETUP LIGHTHOUSE"
+  - sudo mkdir -p /srv/lighthouse
+  #- sudo chown eth2:eth2 /srv/lighthouse
+  - sudo mkdir -p /srv/lighthouse/lighthouse_data
+  - sudo chown eth2:eth2 /srv/lighthouse/lighthouse_data
+  - cd /tmp 
+  - wget -q https://github.com/sigp/lighthouse/releases/download/v2.1.5/lighthouse-v2.1.5-x86_64-unknown-linux-gnu.tar.gz
+  - tar xzf lighthouse-v2.1.5-x86_64-unknown-linux-gnu.tar.gz
+  - cp lighthouse /srv/lighthouse
+  - /srv/lighthouse/lighthouse --version
+
+final_message: "The system is finally up, after $UPTIME seconds"
